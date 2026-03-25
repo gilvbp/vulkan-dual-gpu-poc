@@ -1,52 +1,45 @@
-#include "device_a_present.h"
-#include <iostream>
+#pragma once
+#include <vulkan/vulkan.h>
+#include <vector>
+#include "shared_image.h"
+#include "gpu_timestamps.h"
 
-void DeviceAPresent::init(
-    VkPhysicalDevice phys,
-    VkDevice dev,
-    uint32_t graphicsQueueFamily,
-    uint32_t computeQueueFamily,
-    VkQueue graphicsQueue,
-    VkQueue computeQueue,
-    VkQueue presentQueue)
-{
-    phys_ = phys;
-    dev_ = dev;
-    graphicsQueueFamily_ = graphicsQueueFamily;
-    computeQueueFamily_ = computeQueueFamily;
-    graphicsQueue_ = graphicsQueue;
-    computeQueue_ = computeQueue;
-    presentQueue_ = presentQueue;
-}
+enum RenderQueriesA : uint32_t {
+  QA_BEGIN_CONSUME = 0,
+  QA_END_COMPUTE   = 1,
+  QA_BEGIN_COMPOSE = 2,
+  QA_END_COMPOSE   = 3,
+  QA_COUNT         = 4
+};
 
-void DeviceAPresent::importSharedTargets(
-    uint32_t frameCount,
-    const SharedImageCreateInfo& info,
-    const std::vector<ExportedImageHandle>& exported)
-{
-    imageInfo_ = info;
-    imports_.clear();
-    imports_.reserve(frameCount);
-    for (uint32_t i = 0; i < frameCount; ++i) {
-        imports_.push_back(
-            SharedImage::importFromFd(
-                phys_,
-                dev_,
-                info,
-                exported[i].memoryFd,
-                exported[i].allocationSize));
-    }
-}
+class DeviceAPresent {
+public:
+  void init(VkPhysicalDevice phys, VkDevice dev,
+            uint32_t graphicsQueueFamily,
+            uint32_t computeQueueFamily,
+            VkQueue graphicsQueue,
+            VkQueue computeQueue,
+            VkQueue presentQueue);
 
-void DeviceAPresent::runComputePass(uint32_t slot, uint64_t timelineValue) {
-    (void)slot;
-    (void)timelineValue;
-    // TODO: criar imagem local de saída na GPU A
-    // TODO: descriptor sets + pipeline compute usando passthrough.comp
-}
+  void importSharedTargets(uint32_t frameCount,
+                           const SharedImageCreateInfo& info,
+                           const std::vector<ExportedImageHandle>& exported);
 
-void DeviceAPresent::composeAndPresent(uint32_t slot) {
-    std::cout << "compose/present TODO for slot " << slot << "\n";
-    // TODO: integrar surface/swapchain real e pipeline gráfico fullscreen
-    // TODO: bind da imported image como texture e present na GPU A
-}
+  void runComputePass(uint32_t slot, uint64_t timelineValue);
+  void composeAndPresent(uint32_t slot);
+
+  const GpuTimestamps& timestamps() const { return timestampsA_; }
+
+private:
+  VkPhysicalDevice phys_ = VK_NULL_HANDLE;
+  VkDevice dev_ = VK_NULL_HANDLE;
+
+  VkQueue graphicsQueue_ = VK_NULL_HANDLE;
+  VkQueue computeQueue_ = VK_NULL_HANDLE;
+  VkQueue presentQueue_ = VK_NULL_HANDLE;
+
+  SharedImageCreateInfo imageInfo_{};
+  std::vector<ImportedImageHandle> imports_;
+
+  GpuTimestamps timestampsA_;
+};
