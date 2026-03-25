@@ -5,41 +5,59 @@
 #include "gpu_timestamps.h"
 
 enum RenderQueriesA : uint32_t {
-  QA_BEGIN_CONSUME = 0,
-  QA_END_COMPUTE   = 1,
-  QA_BEGIN_COMPOSE = 2,
-  QA_END_COMPOSE   = 3,
-  QA_COUNT         = 4
+    QA_BEGIN_CONSUME = 0,
+    QA_END_COMPUTE   = 1,
+    QA_BEGIN_COMPOSE = 2,
+    QA_END_COMPOSE   = 3,
+    QA_COUNT         = 4
 };
 
 class DeviceAPresent {
 public:
-  void init(VkPhysicalDevice phys, VkDevice dev,
-            uint32_t graphicsQueueFamily,
-            uint32_t computeQueueFamily,
-            VkQueue graphicsQueue,
-            VkQueue computeQueue,
-            VkQueue presentQueue);
+    void init(VkPhysicalDevice phys, VkDevice dev,
+              uint32_t graphicsQueueFamily,
+              uint32_t computeQueueFamily,
+              VkQueue graphicsQueue,
+              VkQueue computeQueue,
+              VkQueue presentQueue);
 
-  void importSharedTargets(uint32_t frameCount,
-                           const SharedImageCreateInfo& info,
-                           const std::vector<ExportedImageHandle>& exported);
+    void importSharedTargets(uint32_t frameCount,
+                             const SharedImageCreateInfo& info,
+                             const std::vector<ExportedImageHandle>& exported);
 
-  void runComputePass(uint32_t slot, uint64_t timelineValue);
-  void composeAndPresent(uint32_t slot);
+    void createSwapchain(VkSurfaceKHR surface, uint32_t width, uint32_t height);
 
-  const GpuTimestamps& timestamps() const { return timestampsA_; }
+    void runComputePass(uint32_t slot, uint64_t timelineValue);
+    void composeAndPresent(uint32_t slot);
+
+    const GpuTimestamps& timestamps() const { return timestampsA_; }
 
 private:
-  VkPhysicalDevice phys_ = VK_NULL_HANDLE;
-  VkDevice dev_ = VK_NULL_HANDLE;
+    VkPhysicalDevice phys_ = VK_NULL_HANDLE;
+    VkDevice dev_ = VK_NULL_HANDLE;
 
-  VkQueue graphicsQueue_ = VK_NULL_HANDLE;
-  VkQueue computeQueue_ = VK_NULL_HANDLE;
-  VkQueue presentQueue_ = VK_NULL_HANDLE;
+    uint32_t graphicsQueueFamily_ = 0;
+    uint32_t computeQueueFamily_ = 0;
 
-  SharedImageCreateInfo imageInfo_{};
-  std::vector<ImportedImageHandle> imports_;
+    VkQueue graphicsQueue_ = VK_NULL_HANDLE;
+    VkQueue computeQueue_ = VK_NULL_HANDLE;
+    VkQueue presentQueue_ = VK_NULL_HANDLE;
 
-  GpuTimestamps timestampsA_;
+    SharedImageCreateInfo imageInfo_{};
+    std::vector<ImportedImageHandle> imports_;
+
+    VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
+    VkFormat swapFormat_ = VK_FORMAT_B8G8R8A8_UNORM;
+    VkExtent2D extent_{};
+
+    std::vector<VkImage> swapImages_;
+
+    VkCommandPool cmdPool_ = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> cmdBuffers_;
+
+    VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE;
+    VkSemaphore renderCompleteSemaphore_ = VK_NULL_HANDLE;
+
+    GpuTimestamps timestampsA_;
 };
