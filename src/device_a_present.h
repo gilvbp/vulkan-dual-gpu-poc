@@ -1,7 +1,9 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <vector>
+
 #include "shared_image.h"
+#include "shared_buffer.h"
 #include "gpu_timestamps.h"
 
 enum RenderQueriesA : uint32_t {
@@ -23,7 +25,7 @@ public:
 
     void importSharedTargets(uint32_t frameCount,
                              const SharedImageCreateInfo& info,
-                             const std::vector<ExportedImageHandle>& exported);
+                             const std::vector<ExportedBufferHandle>& exported);
 
     void createSwapchain(VkSurfaceKHR surface, uint32_t width, uint32_t height);
 
@@ -44,7 +46,11 @@ private:
     VkQueue presentQueue_ = VK_NULL_HANDLE;
 
     SharedImageCreateInfo imageInfo_{};
-    std::vector<ImportedImageHandle> imports_;
+    SharedBufferCreateInfo bufferInfo_{};
+
+    std::vector<ImportedBufferHandle> imports_;
+    std::vector<VkImage> localImages_;
+    std::vector<VkDeviceMemory> localImageMemory_;
 
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;

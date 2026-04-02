@@ -1,267 +1,191 @@
-#include "device_a_present.h"
+#include "device_b_render.h"
 #include "util.h"
+
 #include <stdexcept>
 
-void DeviceAPresent::init(
+static uint32_t findMemoryTypeLocal(
+    VkPhysicalDevice phys,
+    uint32_t typeBits,
+    VkMemoryPropertyFlags props)
+{
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if ((typeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & props) == props) {
+            return i;
+        }
+    }
+
+    throw std::runtime_error("no suitable memory type");
+}
+
+void DeviceBRender::init(
     VkPhysicalDevice phys,
     VkDevice dev,
     uint32_t graphicsQueueFamily,
-    uint32_t computeQueueFamily,
-    VkQueue graphicsQueue,
-    VkQueue computeQueue,
-    VkQueue presentQueue)
+    VkQueue graphicsQueue)
 {
     phys_ = phys;
     dev_ = dev;
+    queueFamily_ = graphicsQueueFamily;
+    queue_ = graphicsQueue;
 
-    graphicsQueueFamily_ = graphicsQueueFamily;
-    computeQueueFamily_ = computeQueueFamily;
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.queueFamilyIndex = queueFamily_;
 
-    graphicsQueue_ = graphicsQueue;
-    computeQueue_ = computeQueue;
-    presentQueue_ = presentQueue;
-
-    timestampsA_.init(phys_, dev_, QA_COUNT);
+    vkCheck(vkCreateCommandPool(dev_, &pci, nullptr, &cmdPool_), "vkCreateCommandPool B");
+    timestampsB_.init(phys_, dev_, QB_COUNT);
 }
 
-void DeviceAPresent::importSharedTargets(
+void DeviceBRender::createSharedTargets(
     uint32_t frameCount,
-    const SharedImageCreateInfo& info,
-    const std::vector<ExportedImageHandle>& exported)
+    const SharedImageCreateInfo& info)
 {
     imageInfo_ = info;
-    imports_.clear();
-    imports_.reserve(frameCount);
+    bufferInfo_.size = static_cast<VkDeviceSize>(info.width) * info.height * 4;
+
+    renderImages_.resize(frameCount);
+    renderImageMemory_.resize(frameCount);
+    exports_.clear();
+    exports_.reserve(frameCount);
 
     for (uint32_t i = 0; i < frameCount; ++i) {
-        imports_.push_back(
-            SharedImage::importFromFd(
-                phys_,
-                dev_,
-                info,
-                exported[i].memoryFd,
-                exported[i].allocationSize));
-    }
-}
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = info.format;
+        ici.extent = {info.width, info.height, 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-void DeviceAPresent::createSwapchain(VkSurfaceKHR surface, uint32_t width, uint32_t height) {
-    surface_ = surface;
-    extent_ = { width, height };
+        vkCheck(vkCreateImage(dev_, &ici, nullptr, &renderImages_[i]), "vkCreateImage render image");
 
-    VkSwapchainCreateInfoKHR sci{
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = surface_,
-        .minImageCount = 2,
-        .imageFormat = swapFormat_,
-        .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-        .imageExtent = extent_,
-        .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode = VK_PRESENT_MODE_FIFO_KHR,
-        .clipped = VK_TRUE
-    };
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(dev_, renderImages_[i], &req);
 
-    vkCheck(vkCreateSwapchainKHR(dev_, &sci, nullptr, &swapchain_), "vkCreateSwapchainKHR");
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = findMemoryTypeLocal(
+            phys_,
+            req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    uint32_t count = 0;
-    vkCheck(vkGetSwapchainImagesKHR(dev_, swapchain_, &count, nullptr), "vkGetSwapchainImagesKHR count");
-    swapImages_.resize(count);
-    vkCheck(vkGetSwapchainImagesKHR(dev_, swapchain_, &count, swapImages_.data()), "vkGetSwapchainImagesKHR data");
+        vkCheck(vkAllocateMemory(dev_, &mai, nullptr, &renderImageMemory_[i]), "vkAllocateMemory render image");
+        vkCheck(vkBindImageMemory(dev_, renderImages_[i], renderImageMemory_[i], 0), "vkBindImageMemory render image");
 
-    VkCommandPoolCreateInfo pci{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = graphicsQueueFamily_
-    };
-    vkCheck(vkCreateCommandPool(dev_, &pci, nullptr, &cmdPool_), "vkCreateCommandPool A");
-
-    cmdBuffers_.resize(count);
-    VkCommandBufferAllocateInfo ai{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = cmdPool_,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = static_cast<uint32_t>(cmdBuffers_.size())
-    };
-    vkCheck(vkAllocateCommandBuffers(dev_, &ai, cmdBuffers_.data()), "vkAllocateCommandBuffers A");
-
-    VkSemaphoreCreateInfo sciSem{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
-    };
-    vkCheck(vkCreateSemaphore(dev_, &sciSem, nullptr, &acquireSemaphore_), "vkCreateSemaphore acquire");
-    vkCheck(vkCreateSemaphore(dev_, &sciSem, nullptr, &renderCompleteSemaphore_), "vkCreateSemaphore renderComplete");
-}
-
-void DeviceAPresent::runComputePass(uint32_t, uint64_t) {
-    // Ainda não implementado: passo de compute local na GPU A.
-}
-
-void DeviceAPresent::composeAndPresent(uint32_t slot) {
-    if (slot >= imports_.size()) {
-        throw std::runtime_error("composeAndPresent: slot fora do intervalo");
+        exports_.push_back(SharedBuffer::createExportable(phys_, dev_, bufferInfo_));
     }
 
-    uint32_t swapIndex = 0;
-    vkCheck(
-        vkAcquireNextImageKHR(
-            dev_,
-            swapchain_,
-            UINT64_MAX,
-            acquireSemaphore_,
-            VK_NULL_HANDLE,
-            &swapIndex),
-        "vkAcquireNextImageKHR");
+    cmdBuffers_.resize(frameCount);
 
-    VkCommandBuffer cmd = cmdBuffers_[swapIndex];
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = cmdPool_;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = static_cast<uint32_t>(cmdBuffers_.size());
+
+    vkCheck(vkAllocateCommandBuffers(dev_, &ai, cmdBuffers_.data()), "vkAllocateCommandBuffers B");
+}
+
+void DeviceBRender::renderFrame(uint32_t slot, uint64_t frameId)
+{
+    VkCommandBuffer cmd = cmdBuffers_[slot];
     vkResetCommandBuffer(cmd, 0);
 
-    VkCommandBufferBeginInfo bi{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-    };
-    vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer A");
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer B");
 
-    timestampsA_.reset(cmd, 0, QA_COUNT);
-    timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, QA_BEGIN_CONSUME);
+    timestampsB_.reset(cmd, 0, QB_COUNT);
+    timestampsB_.write2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, QB_BEGIN_RENDER);
 
-    VkImage src = imports_[slot].image;
-    VkImage dst = swapImages_[swapIndex];
+    VkImage image = renderImages_[slot];
+    VkBuffer buffer = exports_[slot].buffer;
 
-    VkImageMemoryBarrier2 srcToTransfer{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .image = src,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    };
+    VkImageMemoryBarrier2 toTransferDst{};
+    toTransferDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    toTransferDst.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+    toTransferDst.srcAccessMask = 0;
+    toTransferDst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    toTransferDst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransferDst.image = image;
+    toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    VkImageMemoryBarrier2 dstToTransfer{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = 0,
-        .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .image = dst,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    };
+    VkDependencyInfo dep0{};
+    dep0.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep0.imageMemoryBarrierCount = 1;
+    dep0.pImageMemoryBarriers = &toTransferDst;
+    vkCmdPipelineBarrier2(cmd, &dep0);
 
-    VkImageMemoryBarrier2 beginBarriers[] = { srcToTransfer, dstToTransfer };
+    float t = (frameId % 255) / 255.0f;
+    VkClearColorValue clearColor{{t, 0.2f, 1.0f - t, 1.0f}};
+    VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    VkDependencyInfo depBegin{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 2,
-        .pImageMemoryBarriers = beginBarriers
-    };
-
-    vkCmdPipelineBarrier2(cmd, &depBegin);
-
-    timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, QA_BEGIN_COMPOSE);
-
-    VkImageBlit blit{
-        .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        .srcOffsets = {
-            { 0, 0, 0 },
-            { static_cast<int32_t>(imageInfo_.width), static_cast<int32_t>(imageInfo_.height), 1 }
-        },
-        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        .dstOffsets = {
-            { 0, 0, 0 },
-            { static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1 }
-        }
-    };
-
-    vkCmdBlitImage(
+    vkCmdClearColorImage(
         cmd,
-        src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1, &blit,
-        VK_FILTER_LINEAR
-    );
+        image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        &clearColor,
+        1,
+        &range);
 
-    timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, QA_END_COMPOSE);
+    VkImageMemoryBarrier2 toTransferSrc{};
+    toTransferSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    toTransferSrc.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    toTransferSrc.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    toTransferSrc.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    toTransferSrc.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    toTransferSrc.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransferSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toTransferSrc.image = image;
+    toTransferSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    VkImageMemoryBarrier2 srcBack{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .image = src,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    };
+    VkDependencyInfo dep1{};
+    dep1.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep1.imageMemoryBarrierCount = 1;
+    dep1.pImageMemoryBarriers = &toTransferSrc;
+    vkCmdPipelineBarrier2(cmd, &dep1);
 
-    VkImageMemoryBarrier2 dstToPresent{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_NONE,
-        .dstAccessMask = 0,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        .image = dst,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    };
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {imageInfo_.width, imageInfo_.height, 1};
 
-    VkImageMemoryBarrier2 endBarriers[] = { srcBack, dstToPresent };
+    vkCmdCopyImageToBuffer(
+        cmd,
+        image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        buffer,
+        1,
+        &region);
 
-    VkDependencyInfo depEnd{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 2,
-        .pImageMemoryBarriers = endBarriers
-    };
+    timestampsB_.write2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, QB_END_RENDER);
 
-    vkCmdPipelineBarrier2(cmd, &depEnd);
+    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer B");
 
-    timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, QA_END_COMPUTE);
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = cmd;
 
-    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer A");
+    VkSubmitInfo2 submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &cmdInfo;
 
-    VkSemaphoreSubmitInfo waitInfo{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = acquireSemaphore_,
-        .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT
-    };
-
-    VkCommandBufferSubmitInfo cmdInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-        .commandBuffer = cmd
-    };
-
-    VkSemaphoreSubmitInfo signalInfo{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = renderCompleteSemaphore_,
-        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
-    };
-
-    VkSubmitInfo2 submit{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-        .waitSemaphoreInfoCount = 1,
-        .pWaitSemaphoreInfos = &waitInfo,
-        .commandBufferInfoCount = 1,
-        .pCommandBufferInfos = &cmdInfo,
-        .signalSemaphoreInfoCount = 1,
-        .pSignalSemaphoreInfos = &signalInfo
-    };
-
-    vkCheck(vkQueueSubmit2(graphicsQueue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2 A");
-
-    VkPresentInfoKHR pi{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &renderCompleteSemaphore_,
-        .swapchainCount = 1,
-        .pSwapchains = &swapchain_,
-        .pImageIndices = &swapIndex
-    };
-
-    vkCheck(vkQueuePresentKHR(presentQueue_, &pi), "vkQueuePresentKHR");
+    vkCheck(vkQueueSubmit2(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2 B");
 }

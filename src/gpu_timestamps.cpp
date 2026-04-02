@@ -10,11 +10,10 @@ void GpuTimestamps::init(VkPhysicalDevice phys, VkDevice dev, uint32_t queryCoun
     vkGetPhysicalDeviceProperties(phys_, &props);
     timestampPeriod_ = props.limits.timestampPeriod;
 
-    VkQueryPoolCreateInfo qpci{
-        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-        .queryType = VK_QUERY_TYPE_TIMESTAMP,
-        .queryCount = queryCount_
-    };
+    VkQueryPoolCreateInfo qpci{};
+    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpci.queryCount = queryCount_;
 
     if (vkCreateQueryPool(dev_, &qpci, nullptr, &pool_) != VK_SUCCESS) {
         throw std::runtime_error("vkCreateQueryPool failed");
@@ -55,17 +54,13 @@ TimestampReadback GpuTimestamps::readOne(uint32_t queryIndex) const {
         sizeof(out),
         &out,
         sizeof(out),
-        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT
-    );
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
 
     if (r != VK_SUCCESS && r != VK_NOT_READY) {
         throw std::runtime_error("vkGetQueryPoolResults failed");
     }
 
-    return TimestampReadback{
-        .value = out.value,
-        .available = (out.available != 0)
-    };
+    return TimestampReadback{.value = out.value, .available = (out.available != 0)};
 }
 
 double GpuTimestamps::ticksToNanoseconds(uint64_t ticks) const {

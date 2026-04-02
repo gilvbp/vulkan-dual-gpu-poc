@@ -10,43 +10,43 @@
 
 class App {
 public:
-  void run();
+    void run();
 
 private:
-  void init();
-  void loop();
-  void shutdown();
-  void createDevices();
-  void createSharedResources();
+    void init();
+    void loop();
+    void shutdown();
+    void createDevices();
+    void createSharedResources();
 
 private:
-  VkInstanceWrap instanceWrap_;
-  std::vector<PhysicalGpuInfo> gpus_;
+    VkInstanceWrap instanceWrap_;
+    std::vector<PhysicalGpuInfo> gpus_;
 
-  int gpuAIndex_ = -1;
-  int gpuBIndex_ = -1;
+    int gpuAIndex_ = -1;
+    int gpuBIndex_ = -1;
 
-  VkDevice deviceA_ = VK_NULL_HANDLE;
-  VkDevice deviceB_ = VK_NULL_HANDLE;
+    VkDevice deviceA_ = VK_NULL_HANDLE;
+    VkDevice deviceB_ = VK_NULL_HANDLE;
 
-  VkQueue graphicsQueueA_ = VK_NULL_HANDLE;
-  VkQueue computeQueueA_ = VK_NULL_HANDLE;
-  VkQueue presentQueueA_ = VK_NULL_HANDLE;
-  VkQueue graphicsQueueB_ = VK_NULL_HANDLE;
+    VkQueue graphicsQueueA_ = VK_NULL_HANDLE;
+    VkQueue computeQueueA_ = VK_NULL_HANDLE;
+    VkQueue presentQueueA_ = VK_NULL_HANDLE;
+    VkQueue graphicsQueueB_ = VK_NULL_HANDLE;
 
-  DeviceBRender renderB_;
-  DeviceAPresent presentA_;
+    DeviceBRender renderB_;
+    DeviceAPresent presentA_;
 
-  SharedImageCreateInfo sharedInfo_{};
-  uint32_t frameSlots_ = 2;
+    SharedImageCreateInfo sharedInfo_{};
+    uint32_t frameSlots_ = 2;
 
-  ExportedTimelineSemaphore renderTimelineExport_{};
-  VkSemaphore renderTimelineOnA_ = VK_NULL_HANDLE;
+    ExportedTimelineSemaphore renderTimelineExport_{};
+    VkSemaphore renderTimelineOnA_ = VK_NULL_HANDLE;
 
-  FrameMailbox mailbox_;
-  bool lowLatencyMode_ = true;
-  bool running_ = true;
+    FrameMailbox mailbox_;
+    bool lowLatencyMode_ = true;
+    bool running_ = true;
 
-  GLFWwindow* window_ = nullptr;
-  VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    GLFWwindow* window_ = nullptr;
+    VkSurfaceKHR surface_ = VK_NULL_HANDLE;
 };

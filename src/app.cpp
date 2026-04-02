@@ -21,45 +21,39 @@ static VkDevice createLogicalDevice(
     qcis.reserve(uniqueQueues.size());
 
     for (uint32_t q : uniqueQueues) {
-        VkDeviceQueueCreateInfo qci{
-            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = q,
-            .queueCount = 1,
-            .pQueuePriorities = &prio
-        };
+        VkDeviceQueueCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = q;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &prio;
         qcis.push_back(qci);
     }
 
-    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
-        .timelineSemaphore = VK_TRUE
-    };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
+    timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineFeature.timelineSemaphore = VK_TRUE;
 
-    VkPhysicalDeviceDynamicRenderingFeatures dynamicRendering{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
-        .pNext = &timelineFeature,
-        .dynamicRendering = VK_TRUE
-    };
+    VkPhysicalDeviceDynamicRenderingFeatures dynamicRendering{};
+    dynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamicRendering.pNext = &timelineFeature;
+    dynamicRendering.dynamicRendering = VK_TRUE;
 
-    VkPhysicalDeviceSynchronization2Features sync2{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
-        .pNext = &dynamicRendering,
-        .synchronization2 = VK_TRUE
-    };
+    VkPhysicalDeviceSynchronization2Features sync2{};
+    sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    sync2.pNext = &dynamicRendering;
+    sync2.synchronization2 = VK_TRUE;
 
-    VkPhysicalDeviceFeatures2 features2{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &sync2
-    };
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &sync2;
 
-    VkDeviceCreateInfo dci{
-        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &features2,
-        .queueCreateInfoCount = static_cast<uint32_t>(qcis.size()),
-        .pQueueCreateInfos = qcis.data(),
-        .enabledExtensionCount = static_cast<uint32_t>(exts.size()),
-        .ppEnabledExtensionNames = exts.data()
-    };
+    VkDeviceCreateInfo dci{};
+    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext = &features2;
+    dci.queueCreateInfoCount = static_cast<uint32_t>(qcis.size());
+    dci.pQueueCreateInfos = qcis.data();
+    dci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
+    dci.ppEnabledExtensionNames = exts.data();
 
     VkDevice dev = VK_NULL_HANDLE;
     vkCheck(vkCreateDevice(phys, &dci, nullptr, &dev), "vkCreateDevice");
@@ -158,10 +152,10 @@ void App::createSharedResources() {
 
     renderB_.createSharedTargets(frameSlots_, sharedInfo_);
 
-    std::vector<ExportedImageHandle> exported;
+    std::vector<ExportedBufferHandle> exported;
     exported.reserve(frameSlots_);
     for (uint32_t i = 0; i < frameSlots_; ++i) {
-        exported.push_back(renderB_.exported(i));
+        exported.push_back(renderB_.exportedBuffer(i));
     }
 
     presentA_.importSharedTargets(frameSlots_, sharedInfo_, exported);
