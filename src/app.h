@@ -3,7 +3,6 @@
 #include "gpu_select.h"
 #include "device_b_render.h"
 #include "device_a_present.h"
-#include "timeline_sync.h"
 #include "frame_mailbox.h"
 #include <vector>
 #include <GLFW/glfw3.h>
@@ -39,9 +38,6 @@ private:
 
     SharedImageCreateInfo sharedInfo_{};
     uint32_t frameSlots_ = 2;
-
-    ExportedTimelineSemaphore renderTimelineExport_{};
-    VkSemaphore renderTimelineOnA_ = VK_NULL_HANDLE;
 
     FrameMailbox mailbox_;
     bool lowLatencyMode_ = true;

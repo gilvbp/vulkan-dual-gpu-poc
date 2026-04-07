@@ -3,7 +3,6 @@
 #include <vector>
 
 #include "shared_image.h"
-#include "shared_buffer.h"
 #include "gpu_timestamps.h"
 
 enum RenderQueriesB : uint32_t {
@@ -27,7 +26,8 @@ public:
     void renderFrame(uint32_t slot, uint64_t frameId);
 
     const GpuTimestamps& timestamps() const { return timestampsB_; }
-    const ExportedBufferHandle& exportedBuffer(uint32_t i) const { return exports_[i]; }
+    const void* mappedData(uint32_t i) const { return mappedPtrs_[i]; }
+    VkDeviceSize mappedSize() const { return bufferSize_; }
 
 private:
     VkPhysicalDevice phys_ = VK_NULL_HANDLE;
@@ -40,11 +40,14 @@ private:
     std::vector<VkCommandBuffer> cmdBuffers_;
 
     SharedImageCreateInfo imageInfo_{};
-    SharedBufferCreateInfo bufferInfo_{};
+    VkDeviceSize bufferSize_ = 0;
 
     std::vector<VkImage> renderImages_;
     std::vector<VkDeviceMemory> renderImageMemory_;
-    std::vector<ExportedBufferHandle> exports_;
+
+    std::vector<VkBuffer> readbackBuffers_;
+    std::vector<VkDeviceMemory> readbackMemory_;
+    std::vector<void*> mappedPtrs_;
 
     GpuTimestamps timestampsB_;
 };

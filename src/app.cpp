@@ -100,25 +100,15 @@ void App::init() {
 
     createDevices();
     createSharedResources();
-
     presentA_.createSwapchain(surface_, 1280, 720);
 }
 
 void App::createDevices() {
     std::vector<const char*> extsA = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
 
-    std::vector<const char*> extsB = {
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
-    };
+    std::vector<const char*> extsB = {};
 
     deviceA_ = createLogicalDevice(gpus_[gpuAIndex_].phys, gpus_[gpuAIndex_].qf, extsA);
     deviceB_ = createLogicalDevice(gpus_[gpuBIndex_].phys, gpus_[gpuBIndex_].qf, extsB);
@@ -129,20 +119,8 @@ void App::createDevices() {
 
     vkGetDeviceQueue(deviceB_, gpus_[gpuBIndex_].qf.graphics, 0, &graphicsQueueB_);
 
-    renderB_.init(
-        gpus_[gpuBIndex_].phys,
-        deviceB_,
-        gpus_[gpuBIndex_].qf.graphics,
-        graphicsQueueB_);
-
-    presentA_.init(
-        gpus_[gpuAIndex_].phys,
-        deviceA_,
-        gpus_[gpuAIndex_].qf.graphics,
-        gpus_[gpuAIndex_].qf.compute,
-        graphicsQueueA_,
-        computeQueueA_,
-        presentQueueA_);
+    renderB_.init(gpus_[gpuBIndex_].phys, deviceB_, gpus_[gpuBIndex_].qf.graphics, graphicsQueueB_);
+    presentA_.init(gpus_[gpuAIndex_].phys, deviceA_, gpus_[gpuAIndex_].qf.graphics, gpus_[gpuAIndex_].qf.compute, graphicsQueueA_, computeQueueA_, presentQueueA_);
 }
 
 void App::createSharedResources() {
@@ -151,17 +129,7 @@ void App::createSharedResources() {
     sharedInfo_.format = VK_FORMAT_R8G8B8A8_UNORM;
 
     renderB_.createSharedTargets(frameSlots_, sharedInfo_);
-
-    std::vector<ExportedBufferHandle> exported;
-    exported.reserve(frameSlots_);
-    for (uint32_t i = 0; i < frameSlots_; ++i) {
-        exported.push_back(renderB_.exportedBuffer(i));
-    }
-
-    presentA_.importSharedTargets(frameSlots_, sharedInfo_, exported);
-
-    renderTimelineExport_ = TimelineSync::createExportableTimeline(deviceB_, 0);
-    renderTimelineOnA_ = TimelineSync::importTimelineFromFd(deviceA_, renderTimelineExport_.fd);
+    presentA_.createSharedTargets(frameSlots_, sharedInfo_);
 }
 
 void App::loop() {
@@ -170,7 +138,7 @@ void App::loop() {
     while (running_ && !glfwWindowShouldClose(window_)) {
         glfwPollEvents();
 
-        uint32_t renderSlot = static_cast<uint32_t>((frameId - 1) % frameSlots_);
+        const uint32_t renderSlot = static_cast<uint32_t>((frameId - 1) % frameSlots_);
         renderB_.renderFrame(renderSlot, frameId);
         mailbox_.publishRendered(frameId, renderSlot);
 
@@ -188,21 +156,15 @@ void App::loop() {
         }
 
         auto cpuBeforeWait = std::chrono::steady_clock::now();
-
-        TimelineSync::hostSignal(deviceB_, renderTimelineExport_.semaphore, chosenFrameId);
-        TimelineSync::hostWait(deviceA_, renderTimelineOnA_, chosenFrameId, 1'000'000'000ull);
-
+        presentA_.uploadFrame(chosenSlot, renderB_.mappedData(chosenSlot), renderB_.mappedSize());
         auto cpuAfterWait = std::chrono::steady_clock::now();
 
-        double waitMs =
-            std::chrono::duration<double, std::milli>(cpuAfterWait - cpuBeforeWait).count();
+        double waitMs = std::chrono::duration<double, std::milli>(cpuAfterWait - cpuBeforeWait).count();
 
         presentA_.runComputePass(chosenSlot, chosenFrameId);
         presentA_.composeAndPresent(chosenSlot);
 
         mailbox_.markConsumed(chosenFrameId);
-
-        vkDeviceWaitIdle(deviceB_);
 
         auto qb0 = renderB_.timestamps().readOne(QB_BEGIN_RENDER);
         auto qb1 = renderB_.timestamps().readOne(QB_END_RENDER);
@@ -214,7 +176,7 @@ void App::loop() {
             std::cout
                 << "[frame " << chosenFrameId << "] "
                 << "GPU_B_render=" << renderMs << " ms, "
-                << "CPU_wait=" << waitMs << " ms\n";
+                << "CPU_copy_B_to_A=" << waitMs << " ms\n";
         }
 
         ++frameId;
@@ -226,21 +188,10 @@ void App::loop() {
 }
 
 void App::shutdown() {
-    if (renderTimelineOnA_) {
-        vkDestroySemaphore(deviceA_, renderTimelineOnA_, nullptr);
-        renderTimelineOnA_ = VK_NULL_HANDLE;
-    }
-
-    if (renderTimelineExport_.semaphore) {
-        vkDestroySemaphore(deviceB_, renderTimelineExport_.semaphore, nullptr);
-        renderTimelineExport_.semaphore = VK_NULL_HANDLE;
-    }
-
     if (deviceA_) {
         vkDestroyDevice(deviceA_, nullptr);
         deviceA_ = VK_NULL_HANDLE;
     }
-
     if (deviceB_) {
         vkDestroyDevice(deviceB_, nullptr);
         deviceB_ = VK_NULL_HANDLE;

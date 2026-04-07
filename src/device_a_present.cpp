@@ -1,6 +1,7 @@
 #include "device_a_present.h"
 #include "util.h"
 
+#include <cstring>
 #include <stdexcept>
 
 static uint32_t findMemoryTypeLocal(
@@ -41,27 +42,38 @@ void DeviceAPresent::init(
     timestampsA_.init(phys_, dev_, QA_COUNT);
 }
 
-void DeviceAPresent::importSharedTargets(
-    uint32_t frameCount,
-    const SharedImageCreateInfo& info,
-    const std::vector<ExportedBufferHandle>& exported)
+void DeviceAPresent::createSharedTargets(uint32_t frameCount, const SharedImageCreateInfo& info)
 {
     imageInfo_ = info;
-    bufferInfo_.size = static_cast<VkDeviceSize>(info.width) * info.height * 4;
+    bufferSize_ = static_cast<VkDeviceSize>(info.width) * info.height * 4;
 
-    imports_.clear();
+    uploadBuffers_.resize(frameCount);
+    uploadMemory_.resize(frameCount);
+    mappedPtrs_.resize(frameCount, nullptr);
     localImages_.resize(frameCount);
     localImageMemory_.resize(frameCount);
 
     for (uint32_t i = 0; i < frameCount; ++i) {
-        imports_.push_back(
-            SharedBuffer::importFromFd(
-                phys_,
-                dev_,
-                bufferInfo_,
-                exported[i].memoryFd,
-                exported[i].allocationSize,
-                exported[i].memoryTypeIndex));
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = bufferSize_;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCheck(vkCreateBuffer(dev_, &bci, nullptr, &uploadBuffers_[i]), "vkCreateBuffer upload");
+
+        VkMemoryRequirements reqBuf{};
+        vkGetBufferMemoryRequirements(dev_, uploadBuffers_[i], &reqBuf);
+
+        VkMemoryAllocateInfo maiBuf{};
+        maiBuf.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        maiBuf.allocationSize = reqBuf.size;
+        maiBuf.memoryTypeIndex = findMemoryTypeLocal(
+            phys_, reqBuf.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        vkCheck(vkAllocateMemory(dev_, &maiBuf, nullptr, &uploadMemory_[i]), "vkAllocateMemory upload");
+        vkCheck(vkBindBufferMemory(dev_, uploadBuffers_[i], uploadMemory_[i], 0), "vkBindBufferMemory upload");
+        vkCheck(vkMapMemory(dev_, uploadMemory_[i], 0, bufferSize_, 0, &mappedPtrs_[i]), "vkMapMemory upload");
 
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -78,20 +90,24 @@ void DeviceAPresent::importSharedTargets(
 
         vkCheck(vkCreateImage(dev_, &ici, nullptr, &localImages_[i]), "vkCreateImage local image");
 
-        VkMemoryRequirements req{};
-        vkGetImageMemoryRequirements(dev_, localImages_[i], &req);
+        VkMemoryRequirements reqImg{};
+        vkGetImageMemoryRequirements(dev_, localImages_[i], &reqImg);
 
-        VkMemoryAllocateInfo mai{};
-        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = req.size;
-        mai.memoryTypeIndex = findMemoryTypeLocal(
-            phys_,
-            req.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo maiImg{};
+        maiImg.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        maiImg.allocationSize = reqImg.size;
+        maiImg.memoryTypeIndex = findMemoryTypeLocal(
+            phys_, reqImg.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-        vkCheck(vkAllocateMemory(dev_, &mai, nullptr, &localImageMemory_[i]), "vkAllocateMemory local image");
+        vkCheck(vkAllocateMemory(dev_, &maiImg, nullptr, &localImageMemory_[i]), "vkAllocateMemory local image");
         vkCheck(vkBindImageMemory(dev_, localImages_[i], localImageMemory_[i], 0), "vkBindImageMemory local image");
     }
+}
+
+void DeviceAPresent::uploadFrame(uint32_t slot, const void* data, VkDeviceSize size)
+{
+    if (size > bufferSize_) throw std::runtime_error("uploadFrame size too large");
+    std::memcpy(mappedPtrs_[slot], data, static_cast<size_t>(size));
 }
 
 void DeviceAPresent::createSwapchain(VkSurfaceKHR surface, uint32_t width, uint32_t height) {
@@ -126,7 +142,7 @@ void DeviceAPresent::createSwapchain(VkSurfaceKHR surface, uint32_t width, uint3
     pci.queueFamilyIndex = graphicsQueueFamily_;
     vkCheck(vkCreateCommandPool(dev_, &pci, nullptr, &cmdPool_), "vkCreateCommandPool A");
 
-    cmdBuffers_.resize(count);
+    cmdBuffers_.resize(std::max<size_t>(count, localImages_.size()));
     VkCommandBufferAllocateInfo ai{};
     ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     ai.commandPool = cmdPool_;
@@ -141,23 +157,22 @@ void DeviceAPresent::createSwapchain(VkSurfaceKHR surface, uint32_t width, uint3
 }
 
 void DeviceAPresent::runComputePass(uint32_t slot, uint64_t) {
-    VkCommandBuffer cmd = cmdBuffers_[0];
+    VkCommandBuffer cmd = cmdBuffers_[slot];
     vkResetCommandBuffer(cmd, 0);
 
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer compute-ish");
+    vkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer copy-to-image");
 
     timestampsA_.reset(cmd, 0, QA_COUNT);
     timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, QA_BEGIN_CONSUME);
 
-    VkBuffer srcBuffer = imports_[slot].buffer;
+    VkBuffer srcBuffer = uploadBuffers_[slot];
     VkImage dstImage = localImages_[slot];
 
     VkImageMemoryBarrier2 toTransferDst{};
     toTransferDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     toTransferDst.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-    toTransferDst.srcAccessMask = 0;
     toTransferDst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     toTransferDst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -172,20 +187,10 @@ void DeviceAPresent::runComputePass(uint32_t slot, uint64_t) {
     vkCmdPipelineBarrier2(cmd, &dep);
 
     VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageOffset = {0, 0, 0};
     region.imageExtent = {imageInfo_.width, imageInfo_.height, 1};
 
-    vkCmdCopyBufferToImage(
-        cmd,
-        srcBuffer,
-        dstImage,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1,
-        &region);
+    vkCmdCopyBufferToImage(cmd, srcBuffer, dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     VkImageMemoryBarrier2 toTransferSrc{};
     toTransferSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -206,7 +211,7 @@ void DeviceAPresent::runComputePass(uint32_t slot, uint64_t) {
 
     timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, QA_END_COMPUTE);
 
-    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer compute-ish");
+    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer copy-to-image");
 
     VkCommandBufferSubmitInfo cmdInfo{};
     cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
@@ -217,21 +222,13 @@ void DeviceAPresent::runComputePass(uint32_t slot, uint64_t) {
     submit.commandBufferInfoCount = 1;
     submit.pCommandBufferInfos = &cmdInfo;
 
-    vkCheck(vkQueueSubmit2(graphicsQueue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2 compute-ish");
+    vkCheck(vkQueueSubmit2(graphicsQueue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2 copy-to-image");
     vkQueueWaitIdle(graphicsQueue_);
 }
 
 void DeviceAPresent::composeAndPresent(uint32_t slot) {
     uint32_t swapIndex = 0;
-    vkCheck(
-        vkAcquireNextImageKHR(
-            dev_,
-            swapchain_,
-            UINT64_MAX,
-            acquireSemaphore_,
-            VK_NULL_HANDLE,
-            &swapIndex),
-        "vkAcquireNextImageKHR");
+    vkCheck(vkAcquireNextImageKHR(dev_, swapchain_, UINT64_MAX, acquireSemaphore_, VK_NULL_HANDLE, &swapIndex), "vkAcquireNextImageKHR");
 
     VkCommandBuffer cmd = cmdBuffers_[swapIndex];
     vkResetCommandBuffer(cmd, 0);
@@ -248,7 +245,6 @@ void DeviceAPresent::composeAndPresent(uint32_t slot) {
     VkImageMemoryBarrier2 dstToTransfer{};
     dstToTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     dstToTransfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-    dstToTransfer.srcAccessMask = 0;
     dstToTransfer.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     dstToTransfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     dstToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -264,18 +260,11 @@ void DeviceAPresent::composeAndPresent(uint32_t slot) {
 
     VkImageBlit blit{};
     blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    blit.srcOffsets[0] = {0, 0, 0};
     blit.srcOffsets[1] = {static_cast<int32_t>(imageInfo_.width), static_cast<int32_t>(imageInfo_.height), 1};
     blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    blit.dstOffsets[0] = {0, 0, 0};
     blit.dstOffsets[1] = {static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
 
-    vkCmdBlitImage(
-        cmd,
-        src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1, &blit,
-        VK_FILTER_LINEAR);
+    vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 
     timestampsA_.write2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, QA_END_COMPOSE);
 
@@ -283,8 +272,6 @@ void DeviceAPresent::composeAndPresent(uint32_t slot) {
     dstToPresent.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     dstToPresent.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     dstToPresent.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    dstToPresent.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-    dstToPresent.dstAccessMask = 0;
     dstToPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     dstToPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     dstToPresent.image = dst;

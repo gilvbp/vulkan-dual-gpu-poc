@@ -3,7 +3,6 @@
 #include <vector>
 
 #include "shared_image.h"
-#include "shared_buffer.h"
 #include "gpu_timestamps.h"
 
 enum RenderQueriesA : uint32_t {
@@ -23,10 +22,8 @@ public:
               VkQueue computeQueue,
               VkQueue presentQueue);
 
-    void importSharedTargets(uint32_t frameCount,
-                             const SharedImageCreateInfo& info,
-                             const std::vector<ExportedBufferHandle>& exported);
-
+    void createSharedTargets(uint32_t frameCount, const SharedImageCreateInfo& info);
+    void uploadFrame(uint32_t slot, const void* data, VkDeviceSize size);
     void createSwapchain(VkSurfaceKHR surface, uint32_t width, uint32_t height);
 
     void runComputePass(uint32_t slot, uint64_t timelineValue);
@@ -46,9 +43,11 @@ private:
     VkQueue presentQueue_ = VK_NULL_HANDLE;
 
     SharedImageCreateInfo imageInfo_{};
-    SharedBufferCreateInfo bufferInfo_{};
+    VkDeviceSize bufferSize_ = 0;
 
-    std::vector<ImportedBufferHandle> imports_;
+    std::vector<VkBuffer> uploadBuffers_;
+    std::vector<VkDeviceMemory> uploadMemory_;
+    std::vector<void*> mappedPtrs_;
     std::vector<VkImage> localImages_;
     std::vector<VkDeviceMemory> localImageMemory_;
 

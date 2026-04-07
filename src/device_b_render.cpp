@@ -46,12 +46,13 @@ void DeviceBRender::createSharedTargets(
     const SharedImageCreateInfo& info)
 {
     imageInfo_ = info;
-    bufferInfo_.size = static_cast<VkDeviceSize>(info.width) * info.height * 4;
+    bufferSize_ = static_cast<VkDeviceSize>(info.width) * info.height * 4;
 
     renderImages_.resize(frameCount);
     renderImageMemory_.resize(frameCount);
-    exports_.clear();
-    exports_.reserve(frameCount);
+    readbackBuffers_.resize(frameCount);
+    readbackMemory_.resize(frameCount);
+    mappedPtrs_.resize(frameCount, nullptr);
 
     for (uint32_t i = 0; i < frameCount; ++i) {
         VkImageCreateInfo ici{};
@@ -69,21 +70,38 @@ void DeviceBRender::createSharedTargets(
 
         vkCheck(vkCreateImage(dev_, &ici, nullptr, &renderImages_[i]), "vkCreateImage render image");
 
-        VkMemoryRequirements req{};
-        vkGetImageMemoryRequirements(dev_, renderImages_[i], &req);
+        VkMemoryRequirements reqImg{};
+        vkGetImageMemoryRequirements(dev_, renderImages_[i], &reqImg);
 
-        VkMemoryAllocateInfo mai{};
-        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = req.size;
-        mai.memoryTypeIndex = findMemoryTypeLocal(
-            phys_,
-            req.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo maiImg{};
+        maiImg.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        maiImg.allocationSize = reqImg.size;
+        maiImg.memoryTypeIndex = findMemoryTypeLocal(
+            phys_, reqImg.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-        vkCheck(vkAllocateMemory(dev_, &mai, nullptr, &renderImageMemory_[i]), "vkAllocateMemory render image");
+        vkCheck(vkAllocateMemory(dev_, &maiImg, nullptr, &renderImageMemory_[i]), "vkAllocateMemory render image");
         vkCheck(vkBindImageMemory(dev_, renderImages_[i], renderImageMemory_[i], 0), "vkBindImageMemory render image");
 
-        exports_.push_back(SharedBuffer::createExportable(phys_, dev_, bufferInfo_));
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = bufferSize_;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCheck(vkCreateBuffer(dev_, &bci, nullptr, &readbackBuffers_[i]), "vkCreateBuffer readback");
+
+        VkMemoryRequirements reqBuf{};
+        vkGetBufferMemoryRequirements(dev_, readbackBuffers_[i], &reqBuf);
+
+        VkMemoryAllocateInfo maiBuf{};
+        maiBuf.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        maiBuf.allocationSize = reqBuf.size;
+        maiBuf.memoryTypeIndex = findMemoryTypeLocal(
+            phys_, reqBuf.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        vkCheck(vkAllocateMemory(dev_, &maiBuf, nullptr, &readbackMemory_[i]), "vkAllocateMemory readback");
+        vkCheck(vkBindBufferMemory(dev_, readbackBuffers_[i], readbackMemory_[i], 0), "vkBindBufferMemory readback");
+        vkCheck(vkMapMemory(dev_, readbackMemory_[i], 0, bufferSize_, 0, &mappedPtrs_[i]), "vkMapMemory readback");
     }
 
     cmdBuffers_.resize(frameCount);
@@ -110,12 +128,11 @@ void DeviceBRender::renderFrame(uint32_t slot, uint64_t frameId)
     timestampsB_.write2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, QB_BEGIN_RENDER);
 
     VkImage image = renderImages_[slot];
-    VkBuffer buffer = exports_[slot].buffer;
+    VkBuffer buffer = readbackBuffers_[slot];
 
     VkImageMemoryBarrier2 toTransferDst{};
     toTransferDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     toTransferDst.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-    toTransferDst.srcAccessMask = 0;
     toTransferDst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     toTransferDst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -132,14 +149,7 @@ void DeviceBRender::renderFrame(uint32_t slot, uint64_t frameId)
     float t = (frameId % 255) / 255.0f;
     VkClearColorValue clearColor{{t, 0.2f, 1.0f - t, 1.0f}};
     VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    vkCmdClearColorImage(
-        cmd,
-        image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        &clearColor,
-        1,
-        &range);
+    vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &range);
 
     VkImageMemoryBarrier2 toTransferSrc{};
     toTransferSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -159,23 +169,12 @@ void DeviceBRender::renderFrame(uint32_t slot, uint64_t frameId)
     vkCmdPipelineBarrier2(cmd, &dep1);
 
     VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageOffset = {0, 0, 0};
     region.imageExtent = {imageInfo_.width, imageInfo_.height, 1};
 
-    vkCmdCopyImageToBuffer(
-        cmd,
-        image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        buffer,
-        1,
-        &region);
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
 
     timestampsB_.write2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, QB_END_RENDER);
-
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer B");
 
     VkCommandBufferSubmitInfo cmdInfo{};
@@ -188,4 +187,5 @@ void DeviceBRender::renderFrame(uint32_t slot, uint64_t frameId)
     submit.pCommandBufferInfos = &cmdInfo;
 
     vkCheck(vkQueueSubmit2(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2 B");
+    vkQueueWaitIdle(queue_);
 }
